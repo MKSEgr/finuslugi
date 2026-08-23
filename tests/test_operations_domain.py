@@ -256,6 +256,16 @@ def test_partner_accrual_cannot_exceed_distributable_cash(
         currency="RUB",
         evidence_reference="registry://cash-001",
     )
+
+    with pytest.raises(CashInvariantError, match="exceeds available cash"):
+        create_partner_accrual(
+            cash_receipt=receipt,
+            partner=partner,
+            partner_offer_terms=partner_terms,
+            amount=Decimal("110.00"),
+            rate_basis="invalid over-allocation",
+        )
+
     accrual = create_partner_accrual(
         cash_receipt=receipt,
         partner=partner,
@@ -267,31 +277,6 @@ def test_partner_accrual_cannot_exceed_distributable_cash(
     assert available_for_distribution(receipt) == Decimal("100.00")
     assert allocated_to_partners(receipt) == Decimal("60.00")
     assert accrual.amount == Decimal("60.00")
-
-    second_partner = Partner.objects.create(
-        code="dealer-two",
-        name="Dealer Two",
-        status=Partner.Status.ACTIVE,
-    )
-    second_terms = PartnerOfferTerms.objects.create(
-        partner=second_partner,
-        offer_terms_version=domain["offer_terms"],
-        version=1,
-        published_at=timezone.now(),
-        reward_model=PartnerOfferTerms.RewardModel.FIXED,
-        fixed_amount=Decimal("50.00"),
-        hold_days=0,
-        terms_digest=DIGEST_C,
-    )
-
-    with pytest.raises(CashInvariantError, match="exceeds available cash"):
-        create_partner_accrual(
-            cash_receipt=receipt,
-            partner=second_partner,
-            partner_offer_terms=second_terms,
-            amount=Decimal("50.00"),
-            rate_basis="fixed",
-        )
 
 
 @pytest.mark.django_db
@@ -356,4 +341,165 @@ def test_adjustments_preserve_cash_and_accrual_invariants(
             amount=Decimal("1.00"),
             reason_code="invalid_positive_correction",
             evidence_reference="registry://partner-adjustment-blocked",
+        )
+
+
+@pytest.mark.django_db
+def test_offer_and_partner_terms_reject_ambiguous_payout_shapes(
+    domain: dict[str, object],
+) -> None:
+    offer = domain["offer"]
+    partner = domain["partner"]
+    assert isinstance(offer, Offer)
+    assert isinstance(partner, Partner)
+
+    with pytest.raises(ValidationError, match="requires an amount"):
+        OfferTermsVersion.objects.create(
+            offer=offer,
+            version=2,
+            target_action="asset_delivered",
+            payout_model=OfferTermsVersion.PayoutModel.FIXED,
+            terms_digest=DIGEST_C,
+        )
+
+    draft_offer_terms = OfferTermsVersion.objects.create(
+        offer=offer,
+        version=3,
+        target_action="asset_delivered",
+        payout_model=OfferTermsVersion.PayoutModel.FIXED,
+        payout_amount=Decimal("100.00"),
+        terms_digest=DIGEST_C,
+    )
+    with pytest.raises(ValidationError, match="before advertiser terms"):
+        PartnerOfferTerms.objects.create(
+            partner=partner,
+            offer_terms_version=draft_offer_terms,
+            version=1,
+            published_at=timezone.now(),
+            reward_model=PartnerOfferTerms.RewardModel.FIXED,
+            fixed_amount=Decimal("50.00"),
+            terms_digest=DIGEST_A,
+        )
+
+
+@pytest.mark.django_db
+def test_lead_identity_and_status_projection_cannot_be_rewritten(
+    domain: dict[str, object],
+) -> None:
+    lead = domain["lead"]
+    assert isinstance(lead, Lead)
+
+    lead.contact_fingerprint = DIGEST_A
+    with pytest.raises(ValidationError, match="Immutable lead fields"):
+        lead.save()
+
+    lead.refresh_from_db()
+    append_status_event(
+        lead=lead,
+        status_code=LeadStatus.LEAD_CREATED,
+        actor_type=StatusEvent.ActorType.SYSTEM,
+    )
+    lead.refresh_from_db()
+    lead.current_status = LeadStatus.APPROVED
+    with pytest.raises(ValidationError, match="Immutable lead fields"):
+        lead.save()
+
+
+@pytest.mark.django_db
+def test_direct_lead_attribution_rejects_partner_snapshots(
+    domain: dict[str, object],
+) -> None:
+    offer_terms = domain["offer_terms"]
+    partner = domain["partner"]
+    source = domain["source"]
+    assert isinstance(offer_terms, OfferTermsVersion)
+    assert isinstance(partner, Partner)
+    assert isinstance(source, PartnerSource)
+
+    direct_lead = Lead.objects.create(
+        offer_terms_version=offer_terms,
+        direct_source_code="control-search",
+        client_subject_ref=uuid.uuid4(),
+        organization_fingerprint=DIGEST_A,
+        contact_fingerprint=DIGEST_B,
+        commercial_context={"asset_type": "light_commercial_vehicle"},
+        is_test=True,
+    )
+    with pytest.raises(ValidationError, match="must not contain partner snapshots"):
+        AttributionSnapshot.objects.create(
+            lead=direct_lead,
+            partner_id_snapshot=partner.id,
+            partner_source_id_snapshot=source.id,
+            click_id="direct-click-001",
+            signed_token_digest=DIGEST_C,
+            first_touch_at=timezone.now(),
+        )
+
+
+@pytest.mark.django_db
+def test_cash_receipt_advertiser_must_match_the_lead_offer(
+    domain: dict[str, object],
+) -> None:
+    lead = domain["lead"]
+    assert isinstance(lead, Lead)
+    wrong_advertiser = Advertiser.objects.create(
+        code="wrong-lessor",
+        name="Wrong Lessor",
+        status=Advertiser.Status.COMPATIBLE,
+    )
+
+    with pytest.raises(ValidationError, match="does not match the lead offer"):
+        CashReceipt.objects.create(
+            lead=lead,
+            advertiser=wrong_advertiser,
+            external_reference="wrong-cash-001",
+            gross_amount=Decimal("100.00"),
+            distributable_amount=Decimal("100.00"),
+            currency="RUB",
+            evidence_reference="registry://wrong-cash-001",
+        )
+
+
+@pytest.mark.django_db
+def test_partner_accrual_must_match_the_original_lead_source(
+    domain: dict[str, object],
+) -> None:
+    lead = domain["lead"]
+    advertiser = domain["advertiser"]
+    offer_terms = domain["offer_terms"]
+    assert isinstance(lead, Lead)
+    assert isinstance(advertiser, Advertiser)
+    assert isinstance(offer_terms, OfferTermsVersion)
+
+    other_partner = Partner.objects.create(
+        code="other-dealer",
+        name="Other Dealer",
+        status=Partner.Status.ACTIVE,
+    )
+    other_terms = PartnerOfferTerms.objects.create(
+        partner=other_partner,
+        offer_terms_version=offer_terms,
+        version=1,
+        published_at=timezone.now(),
+        reward_model=PartnerOfferTerms.RewardModel.FIXED,
+        fixed_amount=Decimal("10.00"),
+        terms_digest=DIGEST_C,
+    )
+    receipt = CashReceipt.objects.create(
+        lead=lead,
+        advertiser=advertiser,
+        external_reference="cash-source-mismatch",
+        gross_amount=Decimal("100.00"),
+        distributable_amount=Decimal("100.00"),
+        currency="RUB",
+        evidence_reference="registry://cash-source-mismatch",
+    )
+
+    with pytest.raises(CashInvariantError, match="match the lead source"):
+        create_partner_accrual(
+            cash_receipt=receipt,
+            partner=other_partner,
+            partner_offer_terms=other_terms,
+            amount=Decimal("10.00"),
+            rate_basis="invalid source mismatch",
         )

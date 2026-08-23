@@ -267,6 +267,29 @@ class OfferTermsVersion(ImmutableAfterPublishMixin, TimestampedUUIDModel):
             ),
         ]
 
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, str] = {}
+        amount_required = self.payout_model in {
+            self.PayoutModel.FIXED,
+            self.PayoutModel.HYBRID,
+        }
+        rate_required = self.payout_model in {
+            self.PayoutModel.PERCENT,
+            self.PayoutModel.REVSHARE,
+            self.PayoutModel.HYBRID,
+        }
+        if amount_required and self.payout_amount is None:
+            errors["payout_amount"] = "This payout model requires an amount"
+        if not amount_required and self.payout_amount is not None:
+            errors["payout_amount"] = "This payout model must not define an amount"
+        if rate_required and self.payout_rate is None:
+            errors["payout_rate"] = "This payout model requires a rate"
+        if not rate_required and self.payout_rate is not None:
+            errors["payout_rate"] = "This payout model must not define a rate"
+        if errors:
+            raise ValidationError(errors)
+
     def __str__(self) -> str:
         state = "published" if self.published_at else "draft"
         return f"{self.offer} v{self.version} ({state})"
@@ -322,13 +345,24 @@ class PartnerOfferTerms(ImmutableAfterPublishMixin, TimestampedUUIDModel):
 
     def clean(self) -> None:
         super().clean()
-        if self.reward_model == self.RewardModel.FIXED and self.fixed_amount is None:
-            raise ValidationError({"fixed_amount": "Fixed reward requires an amount"})
-        if (
-            self.reward_model == self.RewardModel.PERCENT_OF_RECEIPT
-            and self.receipt_share_percent is None
-        ):
-            raise ValidationError({"receipt_share_percent": "Percentage reward requires a share"})
+        errors: dict[str, str] = {}
+        if self.published_at is not None and self.offer_terms_version_id:
+            if self.offer_terms_version.published_at is None:
+                errors["offer_terms_version"] = (
+                    "Partner terms cannot be published before advertiser terms"
+                )
+        if self.reward_model == self.RewardModel.FIXED:
+            if self.fixed_amount is None:
+                errors["fixed_amount"] = "Fixed reward requires an amount"
+            if self.receipt_share_percent is not None:
+                errors["receipt_share_percent"] = "Fixed reward must not define a receipt share"
+        elif self.reward_model == self.RewardModel.PERCENT_OF_RECEIPT:
+            if self.receipt_share_percent is None:
+                errors["receipt_share_percent"] = "Percentage reward requires a share"
+            if self.fixed_amount is not None:
+                errors["fixed_amount"] = "Percentage reward must not define a fixed amount"
+        if errors:
+            raise ValidationError(errors)
 
     def publish(self) -> None:
         if self.published_at is not None:
@@ -397,6 +431,11 @@ class Lead(ValidatedModelMixin, TimestampedUUIDModel):
         db_index=True,
         validators=[validate_sha256_digest],
     )
+    fingerprint_key_version = models.PositiveSmallIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Version of the secret key used for HMAC-SHA-256 fingerprints",
+    )
     commercial_context = models.JSONField(default=dict, blank=True, validators=[validate_safe_json])
     current_status = models.CharField(
         max_length=40,
@@ -422,6 +461,54 @@ class Lead(ValidatedModelMixin, TimestampedUUIDModel):
                 name="ops_lead_org_fp_time_idx",
             ),
         ]
+
+    _IMMUTABLE_FIELDS = (
+        "offer_terms_version_id",
+        "partner_source_id",
+        "direct_source_code",
+        "client_subject_ref",
+        "organization_fingerprint",
+        "contact_fingerprint",
+        "fingerprint_key_version",
+        "is_test",
+        "current_status",
+        "current_status_at",
+    )
+
+    def clean(self) -> None:
+        super().clean()
+        errors: dict[str, str] = {}
+        if self.offer_terms_version_id:
+            if self.offer_terms_version.published_at is None:
+                errors["offer_terms_version"] = "Lead requires published offer terms"
+            if self.partner_source_id and not self.offer_terms_version.allow_professional_partners:
+                errors["partner_source"] = (
+                    "Offer terms do not allow professional partner distribution"
+                )
+        if self.partner_source_id:
+            if self.partner_source.status != PartnerSource.Status.APPROVED:
+                errors["partner_source"] = "Lead source must be approved"
+            if self.partner_source.partner.status != Partner.Status.ACTIVE:
+                errors["partner_source"] = "Lead partner must be active"
+        if not self.pk and (self.current_status or self.current_status_at is not None):
+            errors["current_status"] = "Initial status must be appended through the status ledger"
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if self.pk:
+            original = type(self).objects.filter(pk=self.pk).values(*self._IMMUTABLE_FIELDS).first()
+            if original is not None:
+                changed = [
+                    field
+                    for field in self._IMMUTABLE_FIELDS
+                    if getattr(self, field) != original[field]
+                ]
+                if changed:
+                    raise ValidationError(
+                        f"Immutable lead fields cannot be changed: {', '.join(changed)}"
+                    )
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return str(self.id)
@@ -451,12 +538,17 @@ class AttributionSnapshot(ImmutableCreateMixin, TimestampedUUIDModel):
 
     def clean(self) -> None:
         super().clean()
-        if self.lead_id and self.lead.partner_source_id:
+        if not self.lead_id:
+            return
+        if self.lead.partner_source_id:
             expected_partner = self.lead.partner_source.partner_id
             if self.partner_source_id_snapshot != self.lead.partner_source_id:
                 raise ValidationError("Attribution source snapshot does not match the lead")
             if self.partner_id_snapshot != expected_partner:
                 raise ValidationError("Attribution partner snapshot does not match the lead")
+            return
+        if self.partner_id_snapshot is not None or self.partner_source_id_snapshot is not None:
+            raise ValidationError("Direct lead attribution must not contain partner snapshots")
 
     def __str__(self) -> str:
         return f"Attribution {self.lead_id}"
@@ -602,6 +694,16 @@ class CashReceipt(ImmutableCreateMixin, TimestampedUUIDModel):
             ),
         ]
 
+    def clean(self) -> None:
+        super().clean()
+        if not self.lead_id or not self.advertiser_id:
+            return
+        expected_advertiser = self.lead.offer_terms_version.offer.advertiser_id
+        if self.advertiser_id != expected_advertiser:
+            raise ValidationError("Cash receipt advertiser does not match the lead offer")
+        if self.currency != self.lead.offer_terms_version.currency:
+            raise ValidationError("Cash receipt currency does not match the offer terms")
+
     def __str__(self) -> str:
         return f"{self.external_reference}: {self.distributable_amount} {self.currency}"
 
@@ -679,6 +781,8 @@ class PartnerAccrual(ImmutableCreateMixin, TimestampedUUIDModel):
 
     def clean(self) -> None:
         super().clean()
+        if self.partner_offer_terms_id and self.partner_offer_terms.published_at is None:
+            raise ValidationError("Partner terms must be published before accrual")
         if self.partner_offer_terms_id and self.partner_offer_terms.partner_id != self.partner_id:
             raise ValidationError("Partner terms do not belong to the accrual partner")
         if (
@@ -687,6 +791,9 @@ class PartnerAccrual(ImmutableCreateMixin, TimestampedUUIDModel):
             != self.cash_receipt.lead.offer_terms_version_id
         ):
             raise ValidationError("Partner terms do not match the receipt lead offer version")
+        lead_source = self.cash_receipt.lead.partner_source
+        if lead_source is None or lead_source.partner_id != self.partner_id:
+            raise ValidationError("Accrual partner does not match the lead source")
         if self.currency != self.cash_receipt.currency:
             raise ValidationError("Accrual currency must match the cash receipt")
         existing_cash_adjustments = self.cash_receipt.adjustments.aggregate(

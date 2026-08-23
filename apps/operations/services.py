@@ -145,6 +145,13 @@ def create_partner_accrual(
     amount = Decimal(amount)
     if amount <= _ZERO:
         raise CashInvariantError("Partner accrual must be positive")
+    lead_source = locked_receipt.lead.partner_source
+    if lead_source is None or lead_source.partner_id != partner.id:
+        raise CashInvariantError("Accrual partner must match the lead source")
+    if partner_offer_terms.partner_id != partner.id:
+        raise CashInvariantError("Partner terms must belong to the accrual partner")
+    if partner_offer_terms.offer_terms_version_id != locked_receipt.lead.offer_terms_version_id:
+        raise CashInvariantError("Partner terms must match the receipt lead offer version")
     if partner_offer_terms.published_at is None:
         raise CashInvariantError("Partner terms must be published before accrual")
     if PartnerAccrual.objects.filter(
