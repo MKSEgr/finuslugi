@@ -1,4 +1,7 @@
+import pytest
 from django.test import Client
+
+pytestmark = pytest.mark.django_db
 
 
 def test_health_endpoint_reports_database_and_request_id() -> None:
