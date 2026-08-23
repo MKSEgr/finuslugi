@@ -82,6 +82,16 @@ Evidence-driven партнёрская платформа B2B-финансовы
 - ни один оффер не формирует критическую долю результата;
 - качество не основано на одной случайной крупной сделке.
 
+## Проектные документы
+
+- [`docs/architecture.md`](docs/architecture.md) — архитектура и границы модулей;
+- [`docs/operational-mvp.md`](docs/operational-mvp.md) — end-to-end путь заявки, статусы, dedup, routing и денежные инварианты;
+- [`docs/metrics-and-gates.md`](docs/metrics-and-gates.md) — North Star Metric, phase gates и stop rules;
+- [`docs/pilot/embedded-leasing-pilot.md`](docs/pilot/embedded-leasing-pilot.md) — протокол первого embedded-пилота;
+- [`docs/research/initial-advertiser-shortlist.md`](docs/research/initial-advertiser-shortlist.md) — публичный shortlist рекламодателей;
+- [`docs/research/advertiser-scorecard-template.md`](docs/research/advertiser-scorecard-template.md) — Gate 0 scorecard;
+- [`docs/outreach/advertiser-first-contact.md`](docs/outreach/advertiser-first-contact.md) — пакет первого контакта и discovery call.
+
 ## Технический фундамент
 
 Первая версия — модульный Django-монолит с PostgreSQL. Технические решения и границы модулей описаны в [`docs/architecture.md`](docs/architecture.md).
@@ -140,6 +150,6 @@ pytest
 
 ## Текущий статус
 
-`Phase 0 / technical bootstrap`
+`Phase 0 / operational design + advertiser discovery`
 
-Текущая ветка создаёт только технический фундамент. Она не разрешает сбор реальных персональных данных и запуск трафика до закрытия Gate 0 и compliance review.
+Технический bootstrap слит в `main`. Сейчас закрываются Gate 0, operational MVP, первый сегмент design partners и compliance review. Сбор реальных персональных данных и запуск трафика запрещены до письменного подтверждения модели минимум двумя рекламодателями и юридической проверки consent/advertising chain.
