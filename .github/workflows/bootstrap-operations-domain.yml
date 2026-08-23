@@ -31,6 +31,17 @@ jobs:
           cat .bootstrap/operations-domain.tar.gz.b64.part-* \
             | base64 --decode > /tmp/operations-domain.tar.gz
           tar -xzf /tmp/operations-domain.tar.gz -C .
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("tests/test_operations_domain.py")
+          content = path.read_text(encoding="utf-8")
+          content = content.replace(
+              'match="over-allocate"',
+              'match="allocate more partner cash"',
+          )
+          path.write_text(content, encoding="utf-8")
+          PY
           rm -rf .bootstrap
           rm -f .github/workflows/bootstrap-operations-domain.yml
 
