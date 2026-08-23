@@ -36,8 +36,14 @@ class AuditEvent(models.Model):
     class Meta:
         ordering = ["-occurred_at"]
         indexes = [
-            models.Index(fields=["object_type", "object_ref", "occurred_at"]),
-            models.Index(fields=["actor_ref", "occurred_at"]),
+            models.Index(
+                fields=["object_type", "object_ref", "occurred_at"],
+                name="core_audit_obj_time_idx",
+            ),
+            models.Index(
+                fields=["actor_ref", "occurred_at"],
+                name="core_audit_actor_time_idx",
+            ),
         ]
 
     def __str__(self) -> str:
